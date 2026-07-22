@@ -1,73 +1,83 @@
-// simple worker that loops forever and ask for a tasks
-// each time it finish a task, it updates 4 extra fields:
-// runtime     - time taken to finish the task
-// success     - indicates if the last task finished successfully
-// last_update - last time this task updated; timestamp in unix seconds
-// results     - set or list contains the last task result.
+// Example showing how to attach metadata to a lease record via the store directly.
+//
+// In the generic lease design, metadata belongs to the Record, not the Grant.
+// For protected writes, always carry holder_epoch in your write condition.
 package main
 
 import (
+	"context"
+	"log"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
 	"github.com/a8m/lease"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
 )
 
 func main() {
-	log := logrus.New()
-	log.Level = logrus.DebugLevel
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	sess := session.New(&aws.Config{
-		Region: aws.String("us-east-1"),
-	})
-
-	leaser := lease.New(&lease.Config{
-		Logger:     log,
-		Client:     dynamodb.New(sess),
-		LeaseTable: "lease-table-test",
-	})
-
-	// start taking leases
-	err := leaser.Start()
-
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
-		log.WithError(err).Fatal("start leaser")
+		log.Fatalf("connect mongo: %v", err)
 	}
+	defer client.Disconnect(ctx)
 
-	go func() {
-		for {
-			// take tasks to handle,
-			// or sleep for a while if there are no tasks to handle
-			if tasks := leaser.GetHeldLeases(); len(tasks) > 0 {
-				for _, task := range tasks {
-					start := time.Now()
-					log.WithField("task name", task.Key).Info("start handling")
-					// HANDLE YOUR TASK/JOB HERE
-					time.Sleep(time.Second * 5)
-					log.WithField("task name", task.Key).Info("handling finished, update lease")
-					// update different extra fields
-					task.Set("runtime", time.Since(start))
-					task.Set("success", true)
-					// using SetAs will create this attribute as a string set;
-					// use Set() if you want this attribute to be a list.
-					task.SetAs("results", []string{"200", "500", "404"}, lease.StringSet)
-					task.Set("last_update", time.Now().Unix())
-					if _, err := leaser.Update(task); err != nil {
-						log.WithError(err).Error("updating lease")
-					}
-				}
-			} else {
-				duration := time.Second * 10
-				log.WithField("sleeping", duration).Info("there are no tasks to handle")
-				time.Sleep(duration)
-			}
-		}
-	}()
+	coll := client.Database("lease_demo").Collection("leases")
 
-	time.Sleep(time.Minute * 5)
-	// stop taking leases
-	leaser.Stop()
+	store := lease.NewMongoStore(coll)
+
+	mgr := lease.New(store,
+		lease.WithTTL(15*time.Second),
+		lease.WithHolderID("worker-meta"),
+	)
+
+	resourceID := "task-with-metadata"
+
+	// 1. Contend for the lease
+	grant, err := mgr.Contend(context.Background(), resourceID)
+	if err != nil {
+		log.Fatalf("contend: %v", err)
+	}
+	log.Printf("acquired %s epoch=%d", resourceID, grant.HolderEpoch)
+
+	// 2. Protected write: update metadata only if holder_epoch still matches
+	//    This is how you do safe business-state updates under lease protection.
+	result := coll.FindOneAndUpdate(
+		context.Background(),
+		bson.M{
+			"_id":          resourceID,
+			"holder_epoch": grant.HolderEpoch,
+		},
+		bson.M{
+			"$set": bson.M{
+				"metadata.status":      "processing",
+				"metadata.last_update": time.Now().Unix(),
+				"metadata.results":     []string{"200", "500", "404"},
+			},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
+	var updated lease.Record
+	if err := result.Decode(&updated); err != nil {
+		log.Fatalf("protected update failed (maybe lost lease): %v", err)
+	}
+	log.Printf("protected write succeeded: status=%s, version=%d",
+		updated.Metadata["status"], updated.Version)
+
+	// 3. Renew and do more work
+	renewed, err := mgr.Renew(context.Background(), grant)
+	if err != nil {
+		log.Fatalf("renew: %v", err)
+	}
+	log.Printf("renewed: epoch=%d", renewed.HolderEpoch)
+
+	// 4. Release
+	if err := mgr.Release(context.Background(), renewed); err != nil {
+		log.Printf("release: %v", err)
+	}
+	log.Println("released")
 }

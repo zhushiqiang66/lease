@@ -1,113 +1,94 @@
-// simulate distributed system that uses leases to partition work across a
-// fleet of workers.
-//
-// Work tasks should distribute evenly between workers.
-//
-// When worker stops holding a lease, another worker will take and hold it.
+// Simulate a distributed system: two instances with HRW-based task balancing.
 package main
 
 import (
+	"context"
+	"fmt"
+	"log"
+	"os"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
 	"github.com/a8m/lease"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
 )
 
 func main() {
-	log := logrus.New()
-	log.Level = logrus.DebugLevel
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	sess := session.New(&aws.Config{
-		Region: aws.String("us-east-1"),
-	})
-
-	// one dynamodb client
-	client := dynamodb.New(sess)
-
-	// leases creator
-	leaseCreator := lease.New(&lease.Config{
-		Logger:     log,
-		Client:     client,
-		LeaseTable: "lease-table-test",
-	})
-
-	// create four leases
-	tasks := []string{"foo", "bar", "baz", "qux"}
-	for _, task := range tasks {
-		l, err := leaseCreator.Create(lease.Lease{Key: task})
-		if err != nil {
-			log.WithError(err).Error("create lease")
-		} else {
-			log.WithField("name", l.Key).Info("lease created")
-		}
-	}
-
-	done1 := worker(client, log)
-	done2 := worker(client, log)
-
-	time.Sleep(time.Minute * 2)
-
-	done1 <- struct{}{}
-	<-done1
-	log.Info("worker 1 stopped")
-
-	time.Sleep(time.Minute * 2)
-
-	done2 <- struct{}{}
-	<-done2
-	log.Info("worker 2 stopped2. exit...")
-}
-
-func worker(client *dynamodb.DynamoDB, log *logrus.Logger) chan struct{} {
-	// exit/done channel
-	done := make(chan struct{})
-
-	// leases creator
-	leaser := lease.New(&lease.Config{
-		Logger:     log,
-		Client:     client,
-		LeaseTable: "lease-table-test",
-	})
-
-	// start taking leases
-	err := leaser.Start()
-
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
-		log.WithError(err).Fatal("start leaser")
+		log.Fatalf("connect mongo: %v", err)
+	}
+	defer client.Disconnect(ctx)
+
+	coll := client.Database("lease_demo").Collection("leases")
+
+	store := lease.NewMongoStore(coll)
+
+	// Two instances sharing the same members list
+	members := []string{"instance-A", "instance-B"}
+
+	tasks := make([]string, 10)
+	for i := range tasks {
+		tasks[i] = fmt.Sprintf("task-%02d", i)
 	}
 
-	go func() {
-		tick := time.NewTicker(time.Second * 5)
-
-		defer tick.Stop()
-		defer close(done)
-
-		for {
-			select {
-			case <-tick.C:
-				// take tasks to handle,
-				// or sleep for a while if there are no tasks to handle
-				if tasks := leaser.GetHeldLeases(); len(tasks) > 0 {
-					for _, task := range tasks {
-						log.WithField("task name", task.Key).Info("start handling")
-						// HANDLE YOUR TASK/JOB HERE
-						time.Sleep(time.Second * 30)
-						log.WithField("task name", task.Key).Info("handling finished")
-					}
-				} else {
-					log.WithField("sleeping", "5s").Info("there are no tasks to handle")
-				}
-			case <-done:
-				leaser.Stop()
-				return
-			}
+	makeAgent := func(id string) *lease.InstanceAgent {
+		store := lease.NewMongoStore(coll)
+		mgr := lease.New(store,
+			lease.WithTTL(10*time.Second),
+			lease.WithHolderID(id),
+		)
+		handler := lease.TaskFunc{
+			Start: func(taskID string, grant lease.Grant) {
+				log.Printf("[%s] START %s (epoch=%d)", id, taskID, grant.HolderEpoch)
+			},
+			Stop: func(taskID string) {
+				log.Printf("[%s] STOP  %s", id, taskID)
+			},
 		}
-		// stop taking leases
-		leaser.Stop()
-	}()
+		return lease.NewInstanceAgent(lease.BalancerConfig{
+			Lease: mgr,
+			Tasks: func(ctx context.Context) ([]string, error) {
+				return tasks, nil
+			},
+			Members: func(ctx context.Context) ([]string, error) {
+				return members, nil
+			},
+			Handler:           handler,
+			TTL:               10 * time.Second,
+			RebalanceInterval: 2 * time.Second,
+			RenewInterval:     3 * time.Second,
+		})
+	}
 
-	return done
+	agentA := makeAgent("instance-A")
+	agentB := makeAgent("instance-B")
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	ctxB, cancelB := context.WithCancel(context.Background())
+
+	go agentA.Start(ctxA)
+	go agentB.Start(ctxB)
+
+	// Run for 15 seconds, then stop A and watch B take over
+	log.Println("=== both instances running ===")
+	time.Sleep(15 * time.Second)
+
+	log.Printf("=== held by A: %d, held by B: %d ===",
+		len(agentA.HeldGrants()), len(agentB.HeldGrants()))
+
+	log.Println("=== stopping instance A ===")
+	cancelA()
+	time.Sleep(12 * time.Second)
+
+	log.Printf("=== after A stopped: held by B: %d ===", len(agentB.HeldGrants()))
+
+	cancelB()
+	time.Sleep(time.Second)
+	log.Println("done")
+	os.Exit(0)
 }

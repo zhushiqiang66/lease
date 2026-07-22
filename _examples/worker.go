@@ -1,58 +1,79 @@
-// simple worker implementation that loop "forever" and ask for
-// jobs/tasks to handle
+// Simple worker example: one instance holds leases and processes tasks.
 package main
 
 import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
 	"github.com/a8m/lease"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
 )
 
 func main() {
-	log := logrus.New()
-	log.Level = logrus.DebugLevel
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	sess := session.New(&aws.Config{
-		Region: aws.String("us-east-1"),
-	})
-
-	leaser := lease.New(&lease.Config{
-		Logger:     log,
-		Client:     dynamodb.New(sess),
-		LeaseTable: "lease-table-test",
-	})
-
-	// start taking leases
-	err := leaser.Start()
-
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
-		log.WithError(err).Fatal("start leaser")
+		log.Fatalf("connect mongo: %v", err)
+	}
+	defer client.Disconnect(ctx)
+
+	coll := client.Database("lease_demo").Collection("leases")
+
+	store := lease.NewMongoStore(coll)
+
+	mgr := lease.New(store,
+		lease.WithTTL(15*time.Second),
+		lease.WithHolderID("worker-"+fmt.Sprintf("%d", os.Getpid())),
+	)
+
+	// Static task set
+	tasks := []string{"task-alpha", "task-beta", "task-gamma", "task-delta"}
+
+	handler := lease.TaskFunc{
+		Start: func(taskID string, grant lease.Grant) {
+			log.Printf("[START] task=%s epoch=%d", taskID, grant.HolderEpoch)
+			go runTask(taskID, grant)
+		},
+		Stop: func(taskID string) {
+			log.Printf("[STOP]  task=%s", taskID)
+		},
 	}
 
-	go func() {
-		for {
-			// take tasks to handle,
-			// or sleep for a while if there are no tasks to handle
-			if tasks := leaser.GetHeldLeases(); len(tasks) > 0 {
-				for _, task := range tasks {
-					log.WithField("task name", task.Key).Info("start handling")
-					// HANDLE YOUR TASK/JOB HERE
-					time.Sleep(time.Second * 5)
-					log.WithField("task name", task.Key).Info("handling finished")
-				}
-			} else {
-				duration := time.Second * 10
-				log.WithField("sleeping", duration).Info("there are no tasks to handle")
-				time.Sleep(duration)
-			}
-		}
-	}()
+	agent := lease.NewInstanceAgent(lease.BalancerConfig{
+		Lease: mgr,
+		Tasks: func(ctx context.Context) ([]string, error) {
+			return tasks, nil
+		},
+		Handler:           handler,
+		TTL:               15 * time.Second,
+		RebalanceInterval: 5 * time.Second,
+	})
 
-	time.Sleep(time.Minute * 5)
-	// stop taking leases
-	leaser.Stop()
+	go agent.Start(context.Background())
+
+	// Wait for signal
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	log.Println("shutting down...")
+	agent.Stop()
+	log.Println("done")
+}
+
+func runTask(taskID string, grant lease.Grant) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		log.Printf("[WORK]  task=%s epoch=%d", taskID, grant.HolderEpoch)
+	}
 }

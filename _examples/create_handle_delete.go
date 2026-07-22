@@ -1,156 +1,81 @@
-// simulate distributed system that uses leases to partition work across a
-// fleet of workers.
-//
-// Each worker resonsible to 'create', 'delete' and 'handle' leases.
+// Create, handle, and delete leases.
+// Demonstrates the basic lifecycle: create a task, hold its lease, do work, delete when done.
 package main
 
 import (
+	"context"
 	"fmt"
-	"math/rand"
+	"log"
 	"time"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/a8m/lease"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-)
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
-// Task status
-const (
-	TASK_STATUS = "taskStatus"
-	CREATED     = iota
-	PROGRESS_X
-	PROGRESS_Y
-	PROGRESS_Z
-	DONE
+	"github.com/a8m/lease"
 )
 
 func main() {
-	log := logrus.New()
-	log.Level = logrus.DebugLevel
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	sess := session.New(&aws.Config{
-		Region: aws.String("us-east-1"),
-	})
-
-	// create one dynamodb client
-	client := dynamodb.New(sess)
-
-	done1 := newWorker(client, log.WithField("instance", 1))
-	done2 := newWorker(client, log.WithField("instance", 2))
-
-	time.Sleep(time.Minute * 3)
-
-	// termiate instance 1
-	done1 <- struct{}{}
-	// wait for graceful exit
-	<-done1
-
-	time.Sleep(time.Minute * 3)
-
-	// termiate instance 2
-	done2 <- struct{}{}
-	<-done2
-
-	log.Info("exit example")
-}
-
-// worker should represent a single ec2 instance in the system.
-// each worker responsible to 'create' random leases, 'handle' and 'delete' the expired
-func newWorker(client *dynamodb.DynamoDB, log lease.Logger) chan struct{} {
-	// exit/done channel
-	done := make(chan struct{})
-
-	// lease
-	leaser := lease.New(&lease.Config{
-		Logger:     log,
-		Client:     client,
-		LeaseTable: "lease-table-test",
-	})
-
-	// start taking leases
-	err := leaser.Start()
-
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
-		log.WithError(err).Fatal("start leaser")
+		log.Fatalf("connect mongo: %v", err)
+	}
+	defer client.Disconnect(ctx)
+
+	coll := client.Database("lease_demo").Collection("leases")
+
+	store := lease.NewMongoStore(coll)
+
+	mgr := lease.New(store,
+		lease.WithTTL(15*time.Second),
+		lease.WithHolderID("worker-create"),
+	)
+
+	// Create a few tasks by contending for them
+	taskIDs := []string{"task-100", "task-101", "task-102"}
+	for _, id := range taskIDs {
+		grant, err := mgr.Contend(context.Background(), id)
+		if err != nil {
+			log.Printf("contend %s: %v", id, err)
+			continue
+		}
+		log.Printf("acquired %s epoch=%d expires=%s", id, grant.HolderEpoch, grant.ExpiresAt.Format(time.RFC3339))
 	}
 
-	go func() {
-		tickHandle := time.NewTicker(time.Second * 10)
-		// we want it immediately in the first iteration
-		tickCreate := time.After(0)
+	// Observe one
+	g, err := mgr.Observe(context.Background(), "task-100")
+	if err != nil {
+		log.Fatalf("observe: %v", err)
+	}
+	log.Printf("observe task-100: holder=%s epoch=%d", g.HolderID, g.HolderEpoch)
 
-		defer tickHandle.Stop()
-		defer close(done)
+	// Simulate handling: renew loop
+	fmt.Println("\n--- handling with renew loop (5s) ---")
+	deadline := time.After(5 * time.Second)
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
 
-		for {
-			select {
-			case <-tickHandle.C:
-				// take tasks to handle,
-				// or sleep for a while if there are no tasks to handle
-				if tasks := leaser.GetHeldLeases(); len(tasks) > 0 {
-					for _, task := range tasks {
-						status, ok := task.Get(TASK_STATUS)
-						// if this task handled successfully, remove it from the lease table
-						if ok && status.(int) == DONE {
-							log.WithField("expired task", task.Key).Info("deleting")
-							if err := leaser.Delete(task); err != nil {
-								log.WithField("task name", task.Key).WithError(err).Error("deleting failed")
-							} else {
-								log.WithField("task name", task.Key).Info("deleted successfully")
-							}
-							continue
-						}
-						log.WithField("task name", task.Key).Info("start handling")
-						// -------------------------
-						// HANDLE YOUR TASK/JOB HERE
-						// -------------------------
-						time.Sleep(time.Second)
-						log.WithField("task name", task.Key).Info("handling finished")
-
-						// set the status of the task
-						taskStatus := PROGRESS_X
-						// 'ok' means that the 'status' key exists on the map
-						if ok {
-							taskStatus = status.(int)
-							// incrementing it by one may set it to DONE
-							taskStatus++
-						}
-
-						// add metadata on the lease
-						task.Set(TASK_STATUS, taskStatus)
-						task.Set("last_update", time.Now().Unix())
-						task.SetAs("results", []string{"200", "500", "404"}, lease.StringSet)
-						// after finishing the job handling we force updating to
-						// avoid duplication work
-						if _, err := leaser.ForceUpdate(task); err != nil {
-							log.WithField("task name", task.Key).WithError(err).Error("update failed")
-						} else {
-							log.WithField("task name", task.Key).Info("updated successfully")
-						}
-					}
-				}
-			case <-tickCreate:
-				// create 5 random tasks each tick
-				for i := 1; i <= 5; i++ {
-					task := lease.NewLease(fmt.Sprintf("task-%d-%d", i, rand.Intn(1e3)))
-					task.Set("created_at", time.Now().Unix())
-					task.Set(TASK_STATUS, CREATED)
-					l, err := leaser.Create(task)
-					if err != nil {
-						log.WithError(err).Error("create lease")
-					} else {
-						log.WithField("name", l.Key).Info("lease created")
-					}
-				}
-				tickCreate = time.After(time.Minute * 2)
-			case <-done:
-				leaser.Stop()
+	held, _ := mgr.Observe(context.Background(), "task-100")
+	for {
+		select {
+		case <-deadline:
+			fmt.Println("done handling")
+			// Release
+			if err := mgr.Release(context.Background(), held); err != nil {
+				log.Printf("release: %v", err)
+			}
+			log.Println("released task-100")
+			return
+		case <-tick.C:
+			renewed, err := mgr.Renew(context.Background(), held)
+			if err != nil {
+				log.Printf("renew failed: %v", err)
 				return
 			}
+			held = renewed
+			log.Printf("renewed task-100 epoch=%d expires=%s", held.HolderEpoch, held.ExpiresAt.Format(time.RFC3339))
 		}
-	}()
-
-	return done
+	}
 }
