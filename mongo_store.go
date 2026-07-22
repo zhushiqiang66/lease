@@ -14,34 +14,18 @@ import (
 // MongoStore implements Store backed by MongoDB single-document CAS.
 // The resource_id is stored as _id (MongoDB's native primary key).
 type MongoStore struct {
-	coll  *mongo.Collection
-	clock Clock
-}
-
-// MongoStoreOption configures a MongoStore.
-type MongoStoreOption func(*MongoStore)
-
-// WithMongoClock sets the clock. Defaults to real time.
-func WithMongoClock(c Clock) MongoStoreOption {
-	return func(s *MongoStore) { s.clock = c }
+	coll *mongo.Collection
 }
 
 // NewMongoStore creates a MongoStore using the given collection.
-func NewMongoStore(coll *mongo.Collection, opts ...MongoStoreOption) *MongoStore {
-	s := &MongoStore{
-		coll:  coll,
-		clock: realClock{},
-	}
-	for _, opt := range opts {
-		opt(s)
-	}
-	return s
+func NewMongoStore(coll *mongo.Collection) *MongoStore {
+	return &MongoStore{coll: coll}
 }
 
 // Insert inserts a new lease only if no active lease exists for the resource.
 // Uses _id as the primary key with upsert; condition is expired or free.
 func (s *MongoStore) Insert(ctx context.Context, rec Record) (Record, error) {
-	now := s.clock.Now()
+	now := time.Now()
 
 	filter := bson.M{
 		"_id": rec.ResourceID,

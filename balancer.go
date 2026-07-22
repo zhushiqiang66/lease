@@ -285,7 +285,7 @@ func (a *InstanceAgent) holderIDFromManager() string {
 	if a.holderID != "" {
 		return a.holderID
 	}
-	if lm, ok := a.cfg.Lease.(*leaseImpl); ok {
+	if lm, ok := a.cfg.Lease.(*manger); ok {
 		a.holderID = lm.HolderID()
 	}
 	return a.holderID

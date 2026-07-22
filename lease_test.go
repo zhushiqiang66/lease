@@ -144,10 +144,9 @@ func TestReleaseIdempotent(t *testing.T) {
 }
 
 func TestExpiredLeaseCanBeTaken(t *testing.T) {
-	clock := newFakeClock()
-	store := newMemoryStoreWithClock(clock)
-	m1 := New(store, WithHolderID("worker-1"), WithTTL(10*time.Second), WithClock(clock))
-	m2 := New(store, WithHolderID("worker-2"), WithTTL(10*time.Second), WithClock(clock))
+	store := newMemoryStore()
+	m1 := New(store, WithHolderID("worker-1"), WithTTL(100*time.Millisecond))
+	m2 := New(store, WithHolderID("worker-2"), WithTTL(100*time.Millisecond))
 	ctx := context.Background()
 
 	_, err := m1.Contend(ctx, "res-1")
@@ -161,8 +160,8 @@ func TestExpiredLeaseCanBeTaken(t *testing.T) {
 		t.Errorf("before expiry: m2 err = %v, want ErrLeaseHeld", err)
 	}
 
-	// Advance past expiry
-	clock.Add(15 * time.Second)
+	// Wait for expiry
+	time.Sleep(150 * time.Millisecond)
 
 	// Now m2 should be able to contend
 	_, err = m2.Contend(ctx, "res-1")
