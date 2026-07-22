@@ -3,6 +3,7 @@ package lease
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var (
@@ -13,6 +14,16 @@ var (
 	// ErrLeaseNotFound is returned when the lease record does not exist.
 	ErrLeaseNotFound = errors.New("lease: lease not found")
 )
+
+// Record is the shared storage representation of a lease.
+type Record struct {
+	ResourceID  string            `bson:"_id"`
+	HolderID    string            `bson:"holder_id"`
+	HolderEpoch int64             `bson:"holder_epoch"`
+	ExpiresAt   time.Time         `bson:"expires_at"`
+	Version     int64             `bson:"version"`
+	Metadata    map[string]string `bson:"metadata,omitempty"`
+}
 
 // Lease is the core lease interface with four operations:
 // contend, renew, release, observe.

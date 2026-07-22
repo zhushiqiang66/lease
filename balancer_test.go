@@ -1,21 +1,24 @@
-package lease
+package lease_test
 
 import (
 	"context"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/a8m/lease"
+	"github.com/a8m/lease/store"
 )
 
 func TestBalancerSingleInstance(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 
 	tasks := []string{"task-1", "task-2", "task-3"}
 
 	var started, stopped int32
-	handler := TaskFunc{
-		Start: func(taskID string, grant Grant) {
+	handler := lease.TaskFunc{
+		Start: func(taskID string, grant lease.Grant) {
 			atomic.AddInt32(&started, 1)
 		},
 		Stop: func(taskID string) {
@@ -23,7 +26,7 @@ func TestBalancerSingleInstance(t *testing.T) {
 		},
 	}
 
-	agent := NewInstanceAgent(BalancerConfig{
+	agent := lease.NewInstanceAgent(lease.BalancerConfig{
 		Lease: m,
 		Tasks: func(ctx context.Context) ([]string, error) {
 			return tasks, nil
@@ -51,9 +54,9 @@ func TestBalancerSingleInstance(t *testing.T) {
 }
 
 func TestBalancerTwoInstances(t *testing.T) {
-	store := newMemoryStore()
-	m1 := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
-	m2 := New(store, WithHolderID("worker-2"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m1 := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
+	m2 := lease.New(s, lease.WithHolderID("worker-2"), lease.WithTTL(30*time.Second))
 
 	tasks := make([]string, 20)
 	for i := range tasks {
@@ -63,17 +66,17 @@ func TestBalancerTwoInstances(t *testing.T) {
 	members := []string{"worker-1", "worker-2"}
 
 	var started1, stopped1 int32
-	handler1 := TaskFunc{
-		Start: func(taskID string, grant Grant) { atomic.AddInt32(&started1, 1) },
+	handler1 := lease.TaskFunc{
+		Start: func(taskID string, grant lease.Grant) { atomic.AddInt32(&started1, 1) },
 		Stop:  func(taskID string) { atomic.AddInt32(&stopped1, 1) },
 	}
 	var started2, stopped2 int32
-	handler2 := TaskFunc{
-		Start: func(taskID string, grant Grant) { atomic.AddInt32(&started2, 1) },
+	handler2 := lease.TaskFunc{
+		Start: func(taskID string, grant lease.Grant) { atomic.AddInt32(&started2, 1) },
 		Stop:  func(taskID string) { atomic.AddInt32(&stopped2, 1) },
 	}
 
-	agent1 := NewInstanceAgent(BalancerConfig{
+	agent1 := lease.NewInstanceAgent(lease.BalancerConfig{
 		Lease: m1,
 		Tasks: func(ctx context.Context) ([]string, error) { return tasks, nil },
 		Members: func(ctx context.Context) ([]string, error) { return members, nil },
@@ -82,7 +85,7 @@ func TestBalancerTwoInstances(t *testing.T) {
 		RebalanceInterval: 10 * time.Millisecond,
 		RenewInterval:     100 * time.Millisecond,
 	})
-	agent2 := NewInstanceAgent(BalancerConfig{
+	agent2 := lease.NewInstanceAgent(lease.BalancerConfig{
 		Lease: m2,
 		Tasks: func(ctx context.Context) ([]string, error) { return tasks, nil },
 		Members: func(ctx context.Context) ([]string, error) { return members, nil },
@@ -128,19 +131,19 @@ func TestBalancerTwoInstances(t *testing.T) {
 }
 
 func TestBalancerReleaseOnStop(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 
 	tasks := []string{"task-1", "task-2"}
 	stopped := make(chan string, 10)
-	handler := TaskFunc{
-		Start: func(taskID string, grant Grant) {},
+	handler := lease.TaskFunc{
+		Start: func(taskID string, grant lease.Grant) {},
 		Stop: func(taskID string) {
 			stopped <- taskID
 		},
 	}
 
-	agent := NewInstanceAgent(BalancerConfig{
+	agent := lease.NewInstanceAgent(lease.BalancerConfig{
 		Lease: m,
 		Tasks: func(ctx context.Context) ([]string, error) {
 			return tasks, nil
@@ -165,26 +168,24 @@ func TestBalancerReleaseOnStop(t *testing.T) {
 	}
 
 	// All leases should be released
-	store.mu.Lock()
-	all := make([]Record, 0, len(store.data))
-	for _, v := range store.data {
-		all = append(all, *v)
-	}
-	store.mu.Unlock()
-	for _, r := range all {
-		if r.HolderEpoch != 0 {
-			t.Errorf("lease %s still held after stop", r.ResourceID)
+	for _, id := range tasks {
+		g, err := m.Observe(context.Background(), id)
+		if err != nil && err != lease.ErrLeaseNotFound {
+			t.Fatalf("observe %s: %v", id, err)
+		}
+		if g.HolderEpoch != 0 {
+			t.Errorf("lease %s still held after stop", id)
 		}
 	}
 }
 
 func TestBalancerTaskSetChange(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 
 	currentTasks := []string{"task-1", "task-2"}
 
-	agent := NewInstanceAgent(BalancerConfig{
+	agent := lease.NewInstanceAgent(lease.BalancerConfig{
 		Lease: m,
 		Tasks: func(ctx context.Context) ([]string, error) {
 			return currentTasks, nil

@@ -1,14 +1,17 @@
-package lease
+package lease_test
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/a8m/lease"
+	"github.com/a8m/lease/store"
 )
 
 func TestContendAndObserve(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	grant, err := m.Contend(ctx, "res-1")
@@ -36,9 +39,9 @@ func TestContendAndObserve(t *testing.T) {
 }
 
 func TestContendConflict(t *testing.T) {
-	store := newMemoryStore()
-	m1 := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
-	m2 := New(store, WithHolderID("worker-2"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m1 := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
+	m2 := lease.New(s, lease.WithHolderID("worker-2"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	_, err := m1.Contend(ctx, "res-1")
@@ -47,14 +50,14 @@ func TestContendConflict(t *testing.T) {
 	}
 
 	_, err = m2.Contend(ctx, "res-1")
-	if err != ErrLeaseHeld {
+	if err != lease.ErrLeaseHeld {
 		t.Errorf("worker-2 contend err = %v, want ErrLeaseHeld", err)
 	}
 }
 
 func TestRenewSuccess(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	grant, err := m.Contend(ctx, "res-1")
@@ -75,9 +78,9 @@ func TestRenewSuccess(t *testing.T) {
 }
 
 func TestRenewEpochMismatch(t *testing.T) {
-	store := newMemoryStore()
-	m1 := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
-	m2 := New(store, WithHolderID("worker-2"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m1 := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
+	m2 := lease.New(s, lease.WithHolderID("worker-2"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	grant1, err := m1.Contend(ctx, "res-1")
@@ -86,22 +89,22 @@ func TestRenewEpochMismatch(t *testing.T) {
 	}
 
 	// worker-2 tries to renew with worker-1's epoch - should fail
-	badGrant := Grant{
+	badGrant := lease.Grant{
 		ResourceID:  "res-1",
 		HolderID:    "worker-2",
 		HolderEpoch: grant1.HolderEpoch + 999,
 		ExpiresAt:   time.Now().Add(time.Minute),
 	}
 	_, err = m2.Renew(ctx, badGrant)
-	if err != ErrEpochMismatch {
+	if err != lease.ErrEpochMismatch {
 		t.Errorf("renew with bad epoch err = %v, want ErrEpochMismatch", err)
 	}
 }
 
 func TestReleaseAndRecontend(t *testing.T) {
-	store := newMemoryStore()
-	m1 := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
-	m2 := New(store, WithHolderID("worker-2"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m1 := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
+	m2 := lease.New(s, lease.WithHolderID("worker-2"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	grant1, err := m1.Contend(ctx, "res-1")
@@ -125,8 +128,8 @@ func TestReleaseAndRecontend(t *testing.T) {
 }
 
 func TestReleaseIdempotent(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	grant, err := m.Contend(ctx, "res-1")
@@ -144,9 +147,9 @@ func TestReleaseIdempotent(t *testing.T) {
 }
 
 func TestExpiredLeaseCanBeTaken(t *testing.T) {
-	store := newMemoryStore()
-	m1 := New(store, WithHolderID("worker-1"), WithTTL(100*time.Millisecond))
-	m2 := New(store, WithHolderID("worker-2"), WithTTL(100*time.Millisecond))
+	s := store.NewMemory()
+	m1 := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(100*time.Millisecond))
+	m2 := lease.New(s, lease.WithHolderID("worker-2"), lease.WithTTL(100*time.Millisecond))
 	ctx := context.Background()
 
 	_, err := m1.Contend(ctx, "res-1")
@@ -156,7 +159,7 @@ func TestExpiredLeaseCanBeTaken(t *testing.T) {
 
 	// m2 should not be able to take it yet
 	_, err = m2.Contend(ctx, "res-1")
-	if err != ErrLeaseHeld {
+	if err != lease.ErrLeaseHeld {
 		t.Errorf("before expiry: m2 err = %v, want ErrLeaseHeld", err)
 	}
 
@@ -171,19 +174,19 @@ func TestExpiredLeaseCanBeTaken(t *testing.T) {
 }
 
 func TestObserveNotFound(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	_, err := m.Observe(ctx, "nonexistent")
-	if err != ErrLeaseNotFound {
+	if err != lease.ErrLeaseNotFound {
 		t.Errorf("observe err = %v, want ErrLeaseNotFound", err)
 	}
 }
 
 func TestGrantIsValid(t *testing.T) {
 	now := time.Now()
-	g := Grant{
+	g := lease.Grant{
 		ResourceID:  "r",
 		HolderID:    "h",
 		HolderEpoch: 1,
@@ -200,15 +203,15 @@ func TestGrantIsValid(t *testing.T) {
 	}
 
 	// Zero epoch is never valid
-	g2 := Grant{ExpiresAt: now.Add(time.Minute)}
+	g2 := lease.Grant{ExpiresAt: now.Add(time.Minute)}
 	if g2.IsValid(now) {
 		t.Error("grant with zero epoch should not be valid")
 	}
 }
 
 func TestHolderEpochUniqueAcrossContends(t *testing.T) {
-	store := newMemoryStore()
-	m := New(store, WithHolderID("worker-1"), WithTTL(30*time.Second))
+	s := store.NewMemory()
+	m := lease.New(s, lease.WithHolderID("worker-1"), lease.WithTTL(30*time.Second))
 	ctx := context.Background()
 
 	g1, err := m.Contend(ctx, "res-1")

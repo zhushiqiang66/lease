@@ -1,4 +1,4 @@
-package lease
+package store
 
 import (
 	"context"
@@ -9,22 +9,23 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/a8m/lease"
 )
 
-// MongoStore implements Store backed by MongoDB single-document CAS.
+// Mongo implements lease.Store backed by MongoDB single-document CAS.
 // The resource_id is stored as _id (MongoDB's native primary key).
-type MongoStore struct {
+type Mongo struct {
 	coll *mongo.Collection
 }
 
-// NewMongoStore creates a MongoStore using the given collection.
-func NewMongoStore(coll *mongo.Collection) *MongoStore {
-	return &MongoStore{coll: coll}
+// NewMongo creates a Mongo store using the given collection.
+func NewMongo(coll *mongo.Collection) *Mongo {
+	return &Mongo{coll: coll}
 }
 
 // Insert inserts a new lease only if no active lease exists for the resource.
-// Uses _id as the primary key with upsert; condition is expired or free.
-func (s *MongoStore) Insert(ctx context.Context, rec Record) (Record, error) {
+func (s *Mongo) Insert(ctx context.Context, rec lease.Record) (lease.Record, error) {
 	now := time.Now()
 
 	filter := bson.M{
@@ -48,32 +49,31 @@ func (s *MongoStore) Insert(ctx context.Context, rec Record) (Record, error) {
 		SetUpsert(true).
 		SetReturnDocument(options.After)
 
-	var result Record
+	var result lease.Record
 	err := s.coll.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return Record{}, ErrLeaseHeld
+			return lease.Record{}, lease.ErrLeaseHeld
 		}
-		// Duplicate key means the doc exists but doesn't match our filter (someone else holds it)
 		var we mongo.WriteException
 		if errors.As(err, &we) {
 			for _, e := range we.WriteErrors {
 				if e.Code == 11000 {
-					return Record{}, ErrLeaseHeld
+					return lease.Record{}, lease.ErrLeaseHeld
 				}
 			}
 		}
 		var cfe mongo.CommandError
 		if errors.As(err, &cfe) && cfe.Code == 11000 {
-			return Record{}, ErrLeaseHeld
+			return lease.Record{}, lease.ErrLeaseHeld
 		}
-		return Record{}, fmt.Errorf("insert: %w", err)
+		return lease.Record{}, fmt.Errorf("insert: %w", err)
 	}
 	return result, nil
 }
 
 // Update extends the lease if holder_epoch matches.
-func (s *MongoStore) Update(ctx context.Context, rec Record) (Record, error) {
+func (s *Mongo) Update(ctx context.Context, rec lease.Record) (lease.Record, error) {
 	filter := bson.M{
 		"_id":          rec.ResourceID,
 		"holder_epoch": rec.HolderEpoch,
@@ -90,20 +90,20 @@ func (s *MongoStore) Update(ctx context.Context, rec Record) (Record, error) {
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After)
 
-	var result Record
+	var result lease.Record
 	err := s.coll.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return Record{}, ErrEpochMismatch
+			return lease.Record{}, lease.ErrEpochMismatch
 		}
-		return Record{}, fmt.Errorf("update: %w", err)
+		return lease.Record{}, fmt.Errorf("update: %w", err)
 	}
 	return result, nil
 }
 
 // Delete clears holder fields if holder_epoch matches (soft delete).
 // Idempotent: a stale epoch does not produce an error.
-func (s *MongoStore) Delete(ctx context.Context, resourceID string, holderEpoch int64) error {
+func (s *Mongo) Delete(ctx context.Context, resourceID string, holderEpoch int64) error {
 	filter := bson.M{
 		"_id":          resourceID,
 		"holder_epoch": holderEpoch,
@@ -130,14 +130,14 @@ func (s *MongoStore) Delete(ctx context.Context, resourceID string, holderEpoch 
 }
 
 // Get reads the current record for a resource.
-func (s *MongoStore) Get(ctx context.Context, resourceID string) (Record, error) {
-	var rec Record
+func (s *Mongo) Get(ctx context.Context, resourceID string) (lease.Record, error) {
+	var rec lease.Record
 	err := s.coll.FindOne(ctx, bson.M{"_id": resourceID}).Decode(&rec)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return Record{}, ErrLeaseNotFound
+			return lease.Record{}, lease.ErrLeaseNotFound
 		}
-		return Record{}, fmt.Errorf("get: %w", err)
+		return lease.Record{}, fmt.Errorf("get: %w", err)
 	}
 	return rec, nil
 }

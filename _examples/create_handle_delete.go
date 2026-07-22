@@ -12,6 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/a8m/lease"
+	"github.com/a8m/lease/store"
 )
 
 func main() {
@@ -26,9 +27,9 @@ func main() {
 
 	coll := client.Database("lease_demo").Collection("leases")
 
-	store := lease.NewMongoStore(coll)
+	s := store.NewMongo(coll)
 
-	mgr := lease.New(store,
+	mgr := lease.New(s,
 		lease.WithTTL(15*time.Second),
 		lease.WithHolderID("worker-create"),
 	)

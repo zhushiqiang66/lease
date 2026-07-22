@@ -9,17 +9,6 @@ import (
 	"time"
 )
 
-// Record is the shared storage representation of a lease.
-// It maps to a single MongoDB document.
-type Record struct {
-	ResourceID  string            `bson:"_id"`
-	HolderID    string            `bson:"holder_id"`
-	HolderEpoch int64             `bson:"holder_epoch"`
-	ExpiresAt   time.Time         `bson:"expires_at"`
-	Version     int64             `bson:"version"`
-	Metadata    map[string]string `bson:"metadata,omitempty"`
-}
-
 // Store is the storage backend interface.
 // Implementations must provide atomic single-document CAS semantics.
 //
@@ -68,9 +57,9 @@ func WithHolderID(id string) Option {
 }
 
 // New creates a new Lease manager backed by store.
-func New(store Store, opts ...Option) Lease {
+func New(s Store, opts ...Option) Lease {
 	l := &manger{
-		store: store,
+		store: s,
 		ttl:   10 * time.Second,
 	}
 	for _, opt := range opts {

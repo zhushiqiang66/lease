@@ -12,6 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/a8m/lease"
+	"github.com/a8m/lease/store"
 )
 
 func main() {
@@ -26,7 +27,7 @@ func main() {
 
 	coll := client.Database("lease_demo").Collection("leases")
 
-	store := lease.NewMongoStore(coll)
+	s := store.NewMongo(coll)
 
 	// Two instances sharing the same members list
 	members := []string{"instance-A", "instance-B"}
@@ -36,9 +37,8 @@ func main() {
 		tasks[i] = fmt.Sprintf("task-%02d", i)
 	}
 
-	makeAgent := func(id string) *lease.InstanceAgent {
-		store := lease.NewMongoStore(coll)
-		mgr := lease.New(store,
+		makeAgent := func(id string) *lease.InstanceAgent {
+			mgr := lease.New(s,
 			lease.WithTTL(10*time.Second),
 			lease.WithHolderID(id),
 		)
