@@ -15,14 +15,29 @@ var (
 	ErrLeaseNotFound = errors.New("lease: lease not found")
 )
 
-// Record is the shared storage representation of a lease.
-type Record struct {
-	ResourceID  string            `bson:"_id"`
+// Resource is the shared storage representation of a lease.
+type Resource struct {
+	ID          string            `bson:"_id"`
 	HolderID    string            `bson:"holder_id"`
 	HolderEpoch int64             `bson:"holder_epoch"`
 	ExpiresAt   time.Time         `bson:"expires_at"`
 	Version     int64             `bson:"version"`
 	Metadata    map[string]string `bson:"metadata,omitempty"`
+}
+
+// Grant is the caller's proof of lease ownership.
+// It is the only credential callers should hold; all protected writes
+// must carry HolderEpoch for fencing.
+type Grant struct {
+	ResourceID  string
+	HolderID    string
+	HolderEpoch int64
+	ExpiresAt   time.Time
+}
+
+// IsValid returns true if the grant is still held at time t.
+func (g Grant) IsValid(t time.Time) bool {
+	return g.HolderEpoch != 0 && t.Before(g.ExpiresAt)
 }
 
 // Lease is the core lease interface with four operations:

@@ -25,11 +25,11 @@ func NewMongo(coll *mongo.Collection) *Mongo {
 }
 
 // Insert inserts a new lease only if no active lease exists for the resource.
-func (s *Mongo) Insert(ctx context.Context, rec lease.Record) (lease.Record, error) {
+func (s *Mongo) Insert(ctx context.Context, rec lease.Resource) (lease.Resource, error) {
 	now := time.Now()
 
 	filter := bson.M{
-		"_id": rec.ResourceID,
+		"_id": rec.ID,
 		"$or": []bson.M{
 			{"holder_epoch": 0},
 			{"expires_at": bson.M{"$lte": now}},
@@ -49,33 +49,33 @@ func (s *Mongo) Insert(ctx context.Context, rec lease.Record) (lease.Record, err
 		SetUpsert(true).
 		SetReturnDocument(options.After)
 
-	var result lease.Record
+	var result lease.Resource
 	err := s.coll.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return lease.Record{}, lease.ErrLeaseHeld
+			return lease.Resource{}, lease.ErrLeaseHeld
 		}
 		var we mongo.WriteException
 		if errors.As(err, &we) {
 			for _, e := range we.WriteErrors {
 				if e.Code == 11000 {
-					return lease.Record{}, lease.ErrLeaseHeld
+					return lease.Resource{}, lease.ErrLeaseHeld
 				}
 			}
 		}
 		var cfe mongo.CommandError
 		if errors.As(err, &cfe) && cfe.Code == 11000 {
-			return lease.Record{}, lease.ErrLeaseHeld
+			return lease.Resource{}, lease.ErrLeaseHeld
 		}
-		return lease.Record{}, fmt.Errorf("insert: %w", err)
+		return lease.Resource{}, fmt.Errorf("insert: %w", err)
 	}
 	return result, nil
 }
 
 // Update extends the lease if holder_epoch matches.
-func (s *Mongo) Update(ctx context.Context, rec lease.Record) (lease.Record, error) {
+func (s *Mongo) Update(ctx context.Context, rec lease.Resource) (lease.Resource, error) {
 	filter := bson.M{
-		"_id":          rec.ResourceID,
+		"_id":          rec.ID,
 		"holder_epoch": rec.HolderEpoch,
 	}
 
@@ -90,13 +90,13 @@ func (s *Mongo) Update(ctx context.Context, rec lease.Record) (lease.Record, err
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After)
 
-	var result lease.Record
+	var result lease.Resource
 	err := s.coll.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return lease.Record{}, lease.ErrEpochMismatch
+			return lease.Resource{}, lease.ErrEpochMismatch
 		}
-		return lease.Record{}, fmt.Errorf("update: %w", err)
+		return lease.Resource{}, fmt.Errorf("update: %w", err)
 	}
 	return result, nil
 }
@@ -130,14 +130,14 @@ func (s *Mongo) Delete(ctx context.Context, resourceID string, holderEpoch int64
 }
 
 // Get reads the current record for a resource.
-func (s *Mongo) Get(ctx context.Context, resourceID string) (lease.Record, error) {
-	var rec lease.Record
+func (s *Mongo) Get(ctx context.Context, resourceID string) (lease.Resource, error) {
+	var rec lease.Resource
 	err := s.coll.FindOne(ctx, bson.M{"_id": resourceID}).Decode(&rec)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return lease.Record{}, lease.ErrLeaseNotFound
+			return lease.Resource{}, lease.ErrLeaseNotFound
 		}
-		return lease.Record{}, fmt.Errorf("get: %w", err)
+		return lease.Resource{}, fmt.Errorf("get: %w", err)
 	}
 	return rec, nil
 }

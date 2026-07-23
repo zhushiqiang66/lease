@@ -1,6 +1,6 @@
 // Example showing how to attach metadata to a lease record via the store directly.
 //
-// In the generic lease design, metadata belongs to the Record, not the Grant.
+// In the generic lease design, metadata belongs to the Resource, not the Grant.
 // For protected writes, always carry holder_epoch in your write condition.
 package main
 
@@ -62,7 +62,7 @@ func main() {
 		},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	)
-	var updated store.Record
+	var updated store.Resource
 	if err := result.Decode(&updated); err != nil {
 		log.Fatalf("protected update failed (maybe lost lease): %v", err)
 	}
