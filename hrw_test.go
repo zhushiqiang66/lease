@@ -9,8 +9,8 @@ func TestHRWAssignDeterministic(t *testing.T) {
 
 	// Same input should always produce same output
 	for i := 0; i < 10; i++ {
-		first := HRWAssign("task-1", members)
-		second := HRWAssign("task-1", members)
+		first := PickOwner("task-1", members)
+		second := PickOwner("task-1", members)
 		if first != second {
 			t.Errorf("non-deterministic: %s vs %s", first, second)
 		}
@@ -23,7 +23,7 @@ func TestHRWAssignDifferentTasks(t *testing.T) {
 	counts := make(map[string]int)
 	for i := 0; i < 100; i++ {
 		taskID := string(rune('a' + i%26)) + "-task"
-		owner := HRWAssign(taskID, members)
+		owner := PickOwner(taskID, members)
 		counts[owner]++
 	}
 	// With 100 tasks and 5 members, each should get some tasks
@@ -40,8 +40,8 @@ func TestHRWMinimalDisruption(t *testing.T) {
 	total := 100
 	for i := 0; i < total; i++ {
 		taskID := string(rune('a' + i%26)) + "-task-" + string(rune('0'+i/26))
-		orig := HRWAssign(taskID, members)
-		after := HRWAssign(taskID, withoutC)
+		orig := PickOwner(taskID, members)
+		after := PickOwner(taskID, withoutC)
 		if orig != after {
 			changed++
 		}
@@ -56,12 +56,12 @@ func TestHRWMinimalDisruption(t *testing.T) {
 
 func TestHRWAssignN(t *testing.T) {
 	members := []string{"a", "b", "c", "d", "e"}
-	top3 := HRWAssignN("task-xyz", members, 3)
+	top3 := PickOwnerN("task-xyz", members, 3)
 	if len(top3) != 3 {
 		t.Errorf("top3 length = %d, want 3", len(top3))
 	}
 	// Top 1 should match HRWAssign
-	first := HRWAssign("task-xyz", members)
+	first := PickOwner("task-xyz", members)
 	if top3[0] != first {
 		t.Errorf("top3[0] = %q, want %q", top3[0], first)
 	}
@@ -77,7 +77,7 @@ func TestHRWAssignN(t *testing.T) {
 
 func TestSortMembers(t *testing.T) {
 	in := []string{"c", "a", "b"}
-	out := SortMembers(in)
+	out := CanonicalMembers(in)
 	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
 		t.Errorf("sorted = %v, want [a b c]", out)
 	}

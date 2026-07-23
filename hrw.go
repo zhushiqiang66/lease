@@ -11,15 +11,15 @@ import (
 // Properties: deterministic, minimal disruption on membership change,
 // statistically even distribution when task count is large enough.
 
-// HRWAssign returns the owner instanceID for taskID among members.
+// PickOwner returns the owner instanceID for taskID among members.
 // members must be non-empty.
-func HRWAssign(taskID string, members []string) string {
+func PickOwner(taskID string, members []string) string {
 	var (
 		best    string
 		bestSum uint64
 	)
 	for _, m := range members {
-		h := hashPair(taskID, m)
+		h := Score(taskID, m)
 		if best == "" || h > bestSum {
 			bestSum = h
 			best = m
@@ -28,9 +28,9 @@ func HRWAssign(taskID string, members []string) string {
 	return best
 }
 
-// HRWAssignN returns the top-N owner instanceIDs for taskID (sorted highest first).
+// PickOwnerN returns the top-N owner instanceIDs for taskID (sorted highest first).
 // members must be non-empty. n is capped at len(members).
-func HRWAssignN(taskID string, members []string, n int) []string {
+func PickOwnerN(taskID string, members []string, n int) []string {
 	if n > len(members) {
 		n = len(members)
 	}
@@ -40,7 +40,7 @@ func HRWAssignN(taskID string, members []string, n int) []string {
 	}
 	items := make([]scored, len(members))
 	for i, m := range members {
-		items[i] = scored{id: m, score: hashPair(taskID, m)}
+		items[i] = scored{id: m, score: Score(taskID, m)}
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].score != items[j].score {
@@ -55,17 +55,19 @@ func HRWAssignN(taskID string, members []string, n int) []string {
 	return out
 }
 
-// SortMembers returns a deterministically sorted copy of members.
+// CanonicalMembers returns a deterministically sorted copy of members.
 // Always call this before passing member lists to HRW functions
 // to ensure stable output across instances.
-func SortMembers(members []string) []string {
+func CanonicalMembers(members []string) []string {
 	out := make([]string, len(members))
 	copy(out, members)
 	sort.Strings(out)
 	return out
 }
 
-func hashPair(a, b string) uint64 {
+// Score returns a deterministically hashed pair of strings.
+// Always use this instead of directly hashing strings.
+func Score(a, b string) uint64 {
 	h := fnv.New64a()
 	h.Write([]byte(a))
 	h.Write([]byte{0})

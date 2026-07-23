@@ -170,7 +170,7 @@ func (b *Balancer) rebalance(ctx context.Context) error {
 	}
 
 	self := b.owner
-	members = SortMembers(members)
+	members = CanonicalMembers(members)
 
 	b.mu.Lock()
 	holds := make(map[string]Grant, len(b.holds))
@@ -180,7 +180,7 @@ func (b *Balancer) rebalance(ctx context.Context) error {
 	b.mu.Unlock()
 
 	for _, taskID := range tasks {
-		target := HRWAssign(taskID, members)
+		target := PickOwner(taskID, members)
 		_, held := holds[taskID]
 
 		if target == self {
