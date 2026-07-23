@@ -49,7 +49,7 @@ func TestBalancerSingleInstance(t *testing.T) {
 		lease.WithRenewInterval(100*time.Millisecond),
 	)
 
-	go b.Start()
+	b.Start()
 	defer b.Stop()
 
 	time.Sleep(200 * time.Millisecond)
@@ -101,8 +101,8 @@ func TestBalancerTwoInstances(t *testing.T) {
 		lease.WithRenewInterval(100*time.Millisecond),
 	)
 
-	go b1.Start()
-	go b2.Start()
+	b1.Start()
+	b2.Start()
 	defer b1.Stop()
 	defer b2.Stop()
 
@@ -150,7 +150,7 @@ func TestBalancerReleaseOnStop(t *testing.T) {
 		lease.WithRenewInterval(100*time.Millisecond),
 	)
 
-	go b.Start()
+	b.Start()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -187,7 +187,7 @@ func TestBalancerTaskSetChange(t *testing.T) {
 		lease.WithRenewInterval(100*time.Millisecond),
 	)
 
-	go b.Start()
+	b.Start()
 	defer b.Stop()
 
 	time.Sleep(100 * time.Millisecond)

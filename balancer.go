@@ -101,13 +101,17 @@ func NewBalancer(owner string,
 	return b
 }
 
-// Start begins the balancer's rebalance and renew loops.
-// It blocks until the balancer is stopped.
-func (b *Balancer) Start() error {
-	ctx := context.TODO()
+// Start begins the balancer's rebalance and renew loops in the background.
+// It returns immediately. Use Stop to shut down the balancer.
+func (b *Balancer) Start() {
 	b.stopCh = make(chan struct{})
 	b.doneCh = make(chan struct{})
+	go b.run()
+}
+
+func (b *Balancer) run() {
 	defer close(b.doneCh)
+	ctx := context.TODO()
 
 	rebalanceTicker := time.NewTicker(b.rebalanceInterval)
 	defer rebalanceTicker.Stop()
@@ -124,7 +128,7 @@ func (b *Balancer) Start() error {
 		select {
 		case <-b.stopCh:
 			b.release(ctx)
-			return nil
+			return
 		case <-rebalanceTicker.C:
 			_ = b.rebalance(ctx)
 		case <-renewTicker.C:

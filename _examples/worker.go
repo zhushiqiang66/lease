@@ -42,7 +42,7 @@ func main() {
 	holderID := "worker-" + fmt.Sprintf("%d", os.Getpid())
 	runner := &taskRunner{}
 
-	b := lease.NewBalancer(mgr, holderID,
+	b := lease.NewBalancer(holderID, mgr,
 		func(ctx context.Context) ([]string, error) { return tasks, nil },
 		nil,
 		runner,
@@ -50,7 +50,7 @@ func main() {
 		lease.WithRebalanceInterval(5*time.Second),
 	)
 
-	go b.Start()
+	b.Start()
 
 	// Wait for signal
 	sig := make(chan os.Signal, 1)

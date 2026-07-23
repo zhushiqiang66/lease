@@ -43,7 +43,7 @@ func main() {
 			lease.WithHolderID(id),
 		)
 		runner := &distRunner{id: id}
-		return lease.NewBalancer(mgr, id,
+		return lease.NewBalancer(id, mgr,
 			func(ctx context.Context) ([]string, error) { return tasks, nil },
 			func(ctx context.Context) ([]string, error) { return members, nil },
 			runner,
@@ -56,8 +56,8 @@ func main() {
 	balancerA := makeBalancer("instance-A")
 	balancerB := makeBalancer("instance-B")
 
-	go balancerA.Start()
-	go balancerB.Start()
+	balancerA.Start()
+	balancerB.Start()
 
 	// Run for 15 seconds, then stop A and watch B take over
 	log.Println("=== both instances running ===")
