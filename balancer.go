@@ -6,10 +6,12 @@ import (
 	"time"
 )
 
-// TaskHandler is the interface for task execution callbacks.
-// Implementations must handle Start/Stop quickly; long-running work should
-// happen in background goroutines owned by the handler.
-type TaskHandler interface {
+// TaskRunner controls the lifecycle of a single task instance.
+//
+// Implementations must be safe for concurrent calls to Start/Stop for
+// different task IDs. Start and Stop for the same task will be serialized
+// by the Balancer.
+type TaskRunner interface {
 	// OnStart is called when this instance starts holding the lease for taskID.
 	// It must return quickly. The grant can be used for protected writes.
 	OnStart(taskID string, grant Grant)
@@ -20,27 +22,6 @@ type TaskHandler interface {
 	OnStop(taskID string)
 }
 
-// TaskFunc is a simple function-based TaskHandler.
-// Start and stop are separate functions; both may be nil.
-type TaskFunc struct {
-	Start func(taskID string, grant Grant)
-	Stop  func(taskID string)
-}
-
-// OnStart calls Start if set.
-func (f TaskFunc) OnStart(taskID string, grant Grant) {
-	if f.Start != nil {
-		f.Start(taskID, grant)
-	}
-}
-
-// OnStop calls Stop if set.
-func (f TaskFunc) OnStop(taskID string) {
-	if f.Stop != nil {
-		f.Stop(taskID)
-	}
-}
-
 // MembershipProvider returns the current list of live instance IDs.
 // The returned list should be sorted for deterministic assignment.
 type MembershipProvider func(ctx context.Context) ([]string, error)
@@ -48,128 +29,138 @@ type MembershipProvider func(ctx context.Context) ([]string, error)
 // TaskSetProvider returns the current set of task IDs to balance.
 type TaskSetProvider func(ctx context.Context) ([]string, error)
 
-// BalancerConfig configures an InstanceAgent.
-type BalancerConfig struct {
-	// Lease is the lease manager used for contend/renew/release.
-	Lease Lease
-
-	// Tasks provides the current task set.
-	Tasks TaskSetProvider
-
-	// Members provides the current instance membership.
-	// If nil, the agent runs in "single instance" mode and tries to hold all tasks.
-	Members MembershipProvider
-
-	// Handler receives task start/stop events.
-	Handler TaskHandler
-
-	// RenewInterval is how often we renew held leases. Defaults to TTL/3.
-	RenewInterval time.Duration
-
-	// RebalanceInterval is how often we check for rebalance opportunities.
-	// Defaults to 5s.
-	RebalanceInterval time.Duration
-
-	// TTL is the lease TTL. Used to derive default RenewInterval.
-	TTL time.Duration
-}
-
-// InstanceAgent is the per-instance agent that balances tasks across members.
+// Balancer distributes tasks across instances using HRW hashing.
 // It periodically:
 //   - reads task set + membership
 //   - computes target owners via HRW
 //   - contends for tasks that should be ours
 //   - releases tasks that should not be ours
 //   - renews tasks we hold
-type InstanceAgent struct {
-	cfg      BalancerConfig
-	holderID string
+type Balancer struct {
+	lease   Lease
+	tasks   TaskSetProvider
+	members MembershipProvider
+	runner  TaskRunner
+
+	ttl               time.Duration
+	renewInterval     time.Duration
+	rebalanceInterval time.Duration
+
+	owner string
 
 	mu    sync.Mutex
-	holds map[string]Grant // taskID -> grant
+	holds map[string]Grant
 
 	stopCh chan struct{}
 	doneCh chan struct{}
 }
 
-// NewInstanceAgent creates an InstanceAgent.
-func NewInstanceAgent(cfg BalancerConfig) *InstanceAgent {
-	if cfg.TTL == 0 {
-		cfg.TTL = 10 * time.Second
-	}
-	if cfg.RenewInterval == 0 {
-		cfg.RenewInterval = cfg.TTL / 3
-	}
-	if cfg.RebalanceInterval == 0 {
-		cfg.RebalanceInterval = 5 * time.Second
-	}
-	return &InstanceAgent{
-		cfg:   cfg,
-		holds: make(map[string]Grant),
-	}
+// BalancerOption configures a Balancer.
+type BalancerOption func(*Balancer)
+
+// WithBalancerTTL sets the lease TTL. Defaults to 10s.
+func WithBalancerTTL(d time.Duration) BalancerOption {
+	return func(b *Balancer) { b.ttl = d }
 }
 
-// Start begins the agent's rebalance and renew loops.
-// It blocks until the agent is stopped.
-func (a *InstanceAgent) Start(ctx context.Context) error {
-	a.stopCh = make(chan struct{})
-	a.doneCh = make(chan struct{})
-	defer close(a.doneCh)
+// WithRenewInterval sets how often held leases are renewed.
+// Defaults to TTL/3.
+func WithRenewInterval(d time.Duration) BalancerOption {
+	return func(b *Balancer) { b.renewInterval = d }
+}
 
-	rebalanceTicker := time.NewTicker(a.cfg.RebalanceInterval)
+// WithRebalanceInterval sets how often the balancer checks for
+// rebalance opportunities. Defaults to 5s.
+func WithRebalanceInterval(d time.Duration) BalancerOption {
+	return func(b *Balancer) { b.rebalanceInterval = d }
+}
+
+// NewBalancer creates a new Balancer.
+//
+// lease, owner, tasks, members, and runner are required. All other
+// settings have defaults and can be overridden with BalancerOption values.
+func NewBalancer(owner string,
+	lease Lease, tasks TaskSetProvider, members MembershipProvider, runner TaskRunner,
+	opts ...BalancerOption) *Balancer {
+	b := &Balancer{
+		owner:             owner,
+		lease:             lease,
+		tasks:             tasks,
+		members:           members,
+		runner:            runner,
+		ttl:               10 * time.Second,
+		renewInterval:     (10 * time.Second) / 3,
+		rebalanceInterval: 5 * time.Second,
+		holds:             make(map[string]Grant),
+	}
+
+	for _, opt := range opts {
+		opt(b)
+	}
+
+	return b
+}
+
+// Start begins the balancer's rebalance and renew loops.
+// It blocks until the balancer is stopped.
+func (b *Balancer) Start() error {
+	ctx := context.TODO()
+	b.stopCh = make(chan struct{})
+	b.doneCh = make(chan struct{})
+	defer close(b.doneCh)
+
+	rebalanceTicker := time.NewTicker(b.rebalanceInterval)
 	defer rebalanceTicker.Stop()
 
-	renewTicker := time.NewTicker(a.cfg.RenewInterval)
+	renewTicker := time.NewTicker(b.renewInterval)
 	defer renewTicker.Stop()
 
-	// Run immediately on start
-	if err := a.rebalance(ctx); err != nil {
-		// Log-level: continue running even if first cycle fails
+	if err := b.rebalance(ctx); err != nil {
 	}
-	if err := a.renewAll(ctx); err != nil {
-		// Continue
+	if err := b.renew(ctx); err != nil {
 	}
 
 	for {
 		select {
-		case <-ctx.Done():
-			a.releaseAll(context.Background())
-			return ctx.Err()
-		case <-a.stopCh:
-			a.releaseAll(context.Background())
+		case <-b.stopCh:
+			b.release(ctx)
 			return nil
 		case <-rebalanceTicker.C:
-			_ = a.rebalance(ctx)
+			_ = b.rebalance(ctx)
 		case <-renewTicker.C:
-			_ = a.renewAll(ctx)
+			_ = b.renew(ctx)
 		}
 	}
 }
 
-// Stop stops the agent and releases all held leases.
-func (a *InstanceAgent) Stop() {
-	close(a.stopCh)
-	<-a.doneCh
+// Stop stops the balancer and releases all held leases.
+func (b *Balancer) Stop() {
+	close(b.stopCh)
+	<-b.doneCh
 }
 
 // HeldGrants returns a copy of currently held grants.
-func (a *InstanceAgent) HeldGrants() map[string]Grant {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make(map[string]Grant, len(a.holds))
-	for k, v := range a.holds {
+func (b *Balancer) HeldGrants() map[string]Grant {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make(map[string]Grant, len(b.holds))
+	for k, v := range b.holds {
 		out[k] = v
 	}
 	return out
 }
 
-func (a *InstanceAgent) rebalance(ctx context.Context) error {
-	tasks, err := a.cfg.Tasks(ctx)
+// rebalance the task set.
+// It reads the current task set + membership, computes target owners via HRW,
+// contests for tasks that should be ours, releases tasks that should not be ours,
+// and renews tasks we hold.
+func (b *Balancer) rebalance(ctx context.Context) error {
+	tasks, err := b.tasks(ctx)
 	if err != nil {
 		return err
 	}
 
-	members, err := a.resolveMembers(ctx)
+	members, err := b.resolveMembers(ctx)
 	if err != nil {
 		return err
 	}
@@ -178,15 +169,15 @@ func (a *InstanceAgent) rebalance(ctx context.Context) error {
 		return nil
 	}
 
-	self := a.holderIDFromManager()
+	self := b.owner
 	members = SortMembers(members)
 
-	a.mu.Lock()
-	holds := make(map[string]Grant, len(a.holds))
-	for k, v := range a.holds {
+	b.mu.Lock()
+	holds := make(map[string]Grant, len(b.holds))
+	for k, v := range b.holds {
 		holds[k] = v
 	}
-	a.mu.Unlock()
+	b.mu.Unlock()
 
 	for _, taskID := range tasks {
 		target := HRWAssign(taskID, members)
@@ -194,117 +185,93 @@ func (a *InstanceAgent) rebalance(ctx context.Context) error {
 
 		if target == self {
 			if !held {
-				grant, err := a.cfg.Lease.Contend(ctx, taskID)
+				grant, err := b.lease.Contend(ctx, taskID)
 				if err == nil {
-					a.addHold(taskID, grant)
-					if a.cfg.Handler != nil {
-						a.cfg.Handler.OnStart(taskID, grant)
-					}
+					b.add(taskID, grant)
+					b.runner.OnStart(taskID, grant)
 				}
 			}
-			// If already held, renew handles it on its own schedule
 		} else {
 			if held {
 				grant := holds[taskID]
-				if a.cfg.Handler != nil {
-					a.cfg.Handler.OnStop(taskID)
-				}
-				_ = a.cfg.Lease.Release(ctx, grant)
-				a.removeHold(taskID)
+				b.runner.OnStop(taskID)
+				_ = b.lease.Release(ctx, grant)
+				b.remove(taskID)
 			}
 		}
 	}
 
-	// Handle tasks we hold but are no longer in the task set
 	taskSet := make(map[string]struct{}, len(tasks))
 	for _, t := range tasks {
 		taskSet[t] = struct{}{}
 	}
 	for taskID, grant := range holds {
 		if _, ok := taskSet[taskID]; !ok {
-			if a.cfg.Handler != nil {
-				a.cfg.Handler.OnStop(taskID)
-			}
-			_ = a.cfg.Lease.Release(ctx, grant)
-			a.removeHold(taskID)
+			b.runner.OnStop(taskID)
+			_ = b.lease.Release(ctx, grant)
+			b.remove(taskID)
 		}
 	}
 
 	return nil
 }
 
-func (a *InstanceAgent) renewAll(ctx context.Context) error {
-	a.mu.Lock()
-	holds := make(map[string]Grant, len(a.holds))
-	for k, v := range a.holds {
+// renew renews all held leases.
+func (b *Balancer) renew(ctx context.Context) error {
+	b.mu.Lock()
+	holds := make(map[string]Grant, len(b.holds))
+	for k, v := range b.holds {
 		holds[k] = v
 	}
-	a.mu.Unlock()
+	b.mu.Unlock()
 
 	for taskID, grant := range holds {
-		newGrant, err := a.cfg.Lease.Renew(ctx, grant)
+		newGrant, err := b.lease.Renew(ctx, grant)
 		if err != nil {
-			// Lost the lease
-			if a.cfg.Handler != nil {
-				a.cfg.Handler.OnStop(taskID)
-			}
-			a.removeHold(taskID)
+			b.runner.OnStop(taskID)
+			b.remove(taskID)
 			continue
 		}
-		a.updateHold(taskID, newGrant)
+		b.add(taskID, newGrant)
 	}
 	return nil
 }
 
-func (a *InstanceAgent) releaseAll(ctx context.Context) {
-	a.mu.Lock()
-	holds := make(map[string]Grant, len(a.holds))
-	for k, v := range a.holds {
+// release releases all held leases.
+func (b *Balancer) release(ctx context.Context) {
+	b.mu.Lock()
+	holds := make(map[string]Grant, len(b.holds))
+	for k, v := range b.holds {
 		holds[k] = v
 	}
-	a.mu.Unlock()
+	b.mu.Unlock()
 
 	for taskID, grant := range holds {
-		if a.cfg.Handler != nil {
-			a.cfg.Handler.OnStop(taskID)
-		}
-		_ = a.cfg.Lease.Release(ctx, grant)
-		a.removeHold(taskID)
+		b.runner.OnStop(taskID)
+		_ = b.lease.Release(ctx, grant)
+		b.remove(taskID)
 	}
 }
 
-func (a *InstanceAgent) resolveMembers(ctx context.Context) ([]string, error) {
-	if a.cfg.Members == nil {
-		// Single-instance mode: only self
-		return []string{a.holderIDFromManager()}, nil
+func (b *Balancer) resolveMembers(ctx context.Context) ([]string, error) {
+	if b.members == nil {
+		return []string{b.owner}, nil
 	}
-	return a.cfg.Members(ctx)
+	return b.members(ctx)
 }
 
-func (a *InstanceAgent) holderIDFromManager() string {
-	if a.holderID != "" {
-		return a.holderID
-	}
-	if lm, ok := a.cfg.Lease.(*Manager); ok {
-		a.holderID = lm.HolderID()
-	}
-	return a.holderID
+// add adds a grant to the balancer's map of held grants.
+func (b *Balancer) add(taskID string, grant Grant) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.holds[taskID] = grant
 }
 
-func (a *InstanceAgent) addHold(taskID string, grant Grant) {
-	a.mu.Lock()
-	a.holds[taskID] = grant
-	a.mu.Unlock()
-}
+// remove removes a grant from the balancer's map of held grants.
+func (b *Balancer) remove(taskID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-func (a *InstanceAgent) updateHold(taskID string, grant Grant) {
-	a.mu.Lock()
-	a.holds[taskID] = grant
-	a.mu.Unlock()
-}
-
-func (a *InstanceAgent) removeHold(taskID string) {
-	a.mu.Lock()
-	delete(a.holds, taskID)
-	a.mu.Unlock()
+	delete(b.holds, taskID)
 }

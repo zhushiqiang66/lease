@@ -39,27 +39,18 @@ func main() {
 	// Static task set
 	tasks := []string{"task-alpha", "task-beta", "task-gamma", "task-delta"}
 
-	handler := lease.TaskFunc{
-		Start: func(taskID string, grant lease.Grant) {
-			log.Printf("[START] task=%s epoch=%d", taskID, grant.HolderEpoch)
-			go runTask(taskID, grant)
-		},
-		Stop: func(taskID string) {
-			log.Printf("[STOP]  task=%s", taskID)
-		},
-	}
+	holderID := "worker-" + fmt.Sprintf("%d", os.Getpid())
+	runner := &taskRunner{}
 
-	agent := lease.NewInstanceAgent(lease.BalancerConfig{
-		Lease: mgr,
-		Tasks: func(ctx context.Context) ([]string, error) {
-			return tasks, nil
-		},
-		Handler:           handler,
-		TTL:               15 * time.Second,
-		RebalanceInterval: 5 * time.Second,
-	})
+	b := lease.NewBalancer(mgr, holderID,
+		func(ctx context.Context) ([]string, error) { return tasks, nil },
+		nil,
+		runner,
+		lease.WithBalancerTTL(15*time.Second),
+		lease.WithRebalanceInterval(5*time.Second),
+	)
 
-	go agent.Start(context.Background())
+	go b.Start()
 
 	// Wait for signal
 	sig := make(chan os.Signal, 1)
@@ -67,8 +58,19 @@ func main() {
 	<-sig
 
 	log.Println("shutting down...")
-	agent.Stop()
+	b.Stop()
 	log.Println("done")
+}
+
+type taskRunner struct{}
+
+func (r *taskRunner) OnStart(taskID string, grant lease.Grant) {
+	log.Printf("[START] task=%s epoch=%d", taskID, grant.HolderEpoch)
+	go runTask(taskID, grant)
+}
+
+func (r *taskRunner) OnStop(taskID string) {
+	log.Printf("[STOP]  task=%s", taskID)
 }
 
 func runTask(taskID string, grant lease.Grant) {

@@ -58,10 +58,6 @@ func WithHolderID(id string) Option {
 
 // New creates a new Lease backed by store.
 func New(s Store, opts ...Option) Lease {
-	return newManger(s, opts...)
-}
-
-func newManger(s Store, opts ...Option) *Manager {
 	l := &Manager{
 		store: s,
 		ttl:   10 * time.Second,
@@ -133,8 +129,8 @@ func (l *Manager) Observe(ctx context.Context, resourceID string) (Grant, error)
 
 // --- Keeper (with background mode) ---
 
-// Keeper wraps a Lease and manages background contention and renewal.
-// Use the package-level Start function to begin background mode for a resource.
+// Keeper manages background contention and renewal for a single resource.
+// Use the package-level Start function to create and start a Keeper.
 type Keeper struct {
 	lease *Manager
 	ttl   time.Duration
@@ -147,28 +143,34 @@ type Keeper struct {
 	doneCh   chan struct{}
 }
 
-// Start creates a Manager and begins background contention and renewal for the given resource.
-// The manager will keep trying to acquire the lease when not holding,
+// Start creates a Keeper and begins background contention and renewal for the given resource.
+// The keeper will keep trying to acquire the lease when not holding,
 // and renew it while holding.
 //
-// Start runs in a background goroutine; call Stop on the returned Manager to shut down.
-func Start(ctx context.Context, s Store, resourceID string, opts ...Option) *Keeper {
-	m := NewKeeper(s, opts...)
-	m.mu.Lock()
-	m.resource = resourceID
-	m.grant = Grant{}
-	m.held = false
-	m.stopCh = make(chan struct{})
-	m.doneCh = make(chan struct{})
-	stopCh := m.stopCh
-	doneCh := m.doneCh
-	m.mu.Unlock()
+// Start runs in a background goroutine; call Stop on the returned Keeper to shut down.
+func Start(s Store, resourceID string, opts ...Option) *Keeper {
+	l := New(s, opts...).(*Manager)
+	k := &Keeper{
+		lease: l,
+		ttl:   l.ttl,
+	}
+	k.mu.Lock()
+	k.resource = resourceID
+	k.grant = Grant{}
+	k.held = false
+	k.stopCh = make(chan struct{})
+	k.doneCh = make(chan struct{})
+	stopCh := k.stopCh
+	doneCh := k.doneCh
+	k.mu.Unlock()
+
+	bgCtx := context.Background()
 
 	go func() {
 		defer close(doneCh)
 
-		tryInterval := m.ttl / 2
-		renewInterval := m.ttl / 3
+		tryInterval := k.ttl / 2
+		renewInterval := k.ttl / 3
 
 		tryTicker := time.NewTicker(tryInterval)
 		defer tryTicker.Stop()
@@ -176,51 +178,48 @@ func Start(ctx context.Context, s Store, resourceID string, opts ...Option) *Kee
 		renewTicker := time.NewTicker(renewInterval)
 		defer renewTicker.Stop()
 
-		m.tryContend(ctx, resourceID)
+		k.tryContend(bgCtx, resourceID)
 
 		for {
 			select {
-			case <-ctx.Done():
-				m.release(resourceID)
-				return
 			case <-stopCh:
-				m.release(resourceID)
+				k.release(resourceID)
 				return
 			case <-tryTicker.C:
-				if !m.isHeld() {
-					m.tryContend(ctx, resourceID)
+				if !k.IsHolding() {
+					k.tryContend(bgCtx, resourceID)
 				}
 			case <-renewTicker.C:
-				if m.isHeld() {
-					m.tryRenew(ctx, resourceID)
+				if k.IsHolding() {
+					k.tryRenew(bgCtx, resourceID)
 				}
 			}
 		}
 	}()
 
-	return m
+	return k
 }
 
-// NewKeeper creates a new Keeper with background mode support.
-func NewKeeper(s Store, opts ...Option) *Keeper {
-	l := newManger(s, opts...)
-	return &Keeper{
-		lease: l,
-		ttl:   l.ttl,
-	}
+// IsHolding returns whether the keeper currently holds the lease.
+func (k *Keeper) IsHolding() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.held
 }
 
-// Lease returns the underlying Lease interface.
-func (m *Keeper) Lease() Lease {
-	return m.lease
+// CurrentGrant returns the current grant and whether the lease is held.
+func (k *Keeper) CurrentGrant() (Grant, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.grant, k.held
 }
 
-// Stop gracefully shuts down the background manager and releases the lease.
-func (m *Keeper) Stop() {
-	m.mu.Lock()
-	stopCh := m.stopCh
-	doneCh := m.doneCh
-	m.mu.Unlock()
+// Stop gracefully shuts down the keeper and releases the lease.
+func (k *Keeper) Stop() {
+	k.mu.Lock()
+	stopCh := k.stopCh
+	doneCh := k.doneCh
+	k.mu.Unlock()
 
 	if stopCh == nil {
 		return
@@ -229,57 +228,44 @@ func (m *Keeper) Stop() {
 	<-doneCh
 }
 
-// Grant returns the current grant and whether the lease is held.
-func (m *Keeper) Grant() (Grant, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.grant, m.held
-}
-
-func (m *Keeper) isHeld() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.held
-}
-
-func (m *Keeper) tryContend(ctx context.Context, resourceID string) {
-	grant, err := m.lease.Contend(ctx, resourceID)
+func (k *Keeper) tryContend(ctx context.Context, resourceID string) {
+	grant, err := k.lease.Contend(ctx, resourceID)
 	if err != nil {
 		return
 	}
-	m.mu.Lock()
-	m.grant = grant
-	m.held = true
-	m.mu.Unlock()
+	k.mu.Lock()
+	k.grant = grant
+	k.held = true
+	k.mu.Unlock()
 }
 
-func (m *Keeper) tryRenew(ctx context.Context, resourceID string) {
-	m.mu.Lock()
-	current := m.grant
-	m.mu.Unlock()
+func (k *Keeper) tryRenew(ctx context.Context, resourceID string) {
+	k.mu.Lock()
+	current := k.grant
+	k.mu.Unlock()
 
-	grant, err := m.lease.Renew(ctx, current)
+	grant, err := k.lease.Renew(ctx, current)
 	if err != nil {
-		m.mu.Lock()
-		m.held = false
-		m.grant = Grant{}
-		m.mu.Unlock()
+		k.mu.Lock()
+		k.held = false
+		k.grant = Grant{}
+		k.mu.Unlock()
 		return
 	}
-	m.mu.Lock()
-	m.grant = grant
-	m.mu.Unlock()
+	k.mu.Lock()
+	k.grant = grant
+	k.mu.Unlock()
 }
 
-func (m *Keeper) release(resourceID string) {
-	m.mu.Lock()
-	held := m.held
-	grant := m.grant
-	m.held = false
-	m.grant = Grant{}
-	m.mu.Unlock()
+func (k *Keeper) release(resourceID string) {
+	k.mu.Lock()
+	held := k.held
+	grant := k.grant
+	k.held = false
+	k.grant = Grant{}
+	k.mu.Unlock()
 	if held {
-		_ = m.lease.Release(context.Background(), grant)
+		_ = k.lease.Release(context.Background(), grant)
 	}
 }
 

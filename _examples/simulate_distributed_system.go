@@ -37,58 +37,55 @@ func main() {
 		tasks[i] = fmt.Sprintf("task-%02d", i)
 	}
 
-		makeAgent := func(id string) *lease.InstanceAgent {
-			mgr := lease.New(s,
+	makeBalancer := func(id string) *lease.Balancer {
+		mgr := lease.New(s,
 			lease.WithTTL(10*time.Second),
 			lease.WithHolderID(id),
 		)
-		handler := lease.TaskFunc{
-			Start: func(taskID string, grant lease.Grant) {
-				log.Printf("[%s] START %s (epoch=%d)", id, taskID, grant.HolderEpoch)
-			},
-			Stop: func(taskID string) {
-				log.Printf("[%s] STOP  %s", id, taskID)
-			},
-		}
-		return lease.NewInstanceAgent(lease.BalancerConfig{
-			Lease: mgr,
-			Tasks: func(ctx context.Context) ([]string, error) {
-				return tasks, nil
-			},
-			Members: func(ctx context.Context) ([]string, error) {
-				return members, nil
-			},
-			Handler:           handler,
-			TTL:               10 * time.Second,
-			RebalanceInterval: 2 * time.Second,
-			RenewInterval:     3 * time.Second,
-		})
+		runner := &distRunner{id: id}
+		return lease.NewBalancer(mgr, id,
+			func(ctx context.Context) ([]string, error) { return tasks, nil },
+			func(ctx context.Context) ([]string, error) { return members, nil },
+			runner,
+			lease.WithBalancerTTL(10*time.Second),
+			lease.WithRebalanceInterval(2*time.Second),
+			lease.WithRenewInterval(3*time.Second),
+		)
 	}
 
-	agentA := makeAgent("instance-A")
-	agentB := makeAgent("instance-B")
+	balancerA := makeBalancer("instance-A")
+	balancerB := makeBalancer("instance-B")
 
-	ctxA, cancelA := context.WithCancel(context.Background())
-	ctxB, cancelB := context.WithCancel(context.Background())
-
-	go agentA.Start(ctxA)
-	go agentB.Start(ctxB)
+	go balancerA.Start()
+	go balancerB.Start()
 
 	// Run for 15 seconds, then stop A and watch B take over
 	log.Println("=== both instances running ===")
 	time.Sleep(15 * time.Second)
 
 	log.Printf("=== held by A: %d, held by B: %d ===",
-		len(agentA.HeldGrants()), len(agentB.HeldGrants()))
+		len(balancerA.HeldGrants()), len(balancerB.HeldGrants()))
 
 	log.Println("=== stopping instance A ===")
-	cancelA()
+	balancerA.Stop()
 	time.Sleep(12 * time.Second)
 
-	log.Printf("=== after A stopped: held by B: %d ===", len(agentB.HeldGrants()))
+	log.Printf("=== after A stopped: held by B: %d ===", len(balancerB.HeldGrants()))
 
-	cancelB()
+	balancerB.Stop()
 	time.Sleep(time.Second)
 	log.Println("done")
 	os.Exit(0)
+}
+
+type distRunner struct {
+	id string
+}
+
+func (r *distRunner) OnStart(taskID string, grant lease.Grant) {
+	log.Printf("[%s] START %s (epoch=%d)", r.id, taskID, grant.HolderEpoch)
+}
+
+func (r *distRunner) OnStop(taskID string) {
+	log.Printf("[%s] STOP  %s", r.id, taskID)
 }
