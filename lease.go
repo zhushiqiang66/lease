@@ -17,12 +17,11 @@ var (
 
 // Resource is the shared storage representation of a lease.
 type Resource struct {
-	ID          string            `bson:"_id"`
-	HolderID    string            `bson:"holder_id"`
-	HolderEpoch int64             `bson:"holder_epoch"`
-	ExpiresAt   time.Time         `bson:"expires_at"`
-	Version     int64             `bson:"version"`
-	Metadata    map[string]string `bson:"metadata,omitempty"`
+	ID          string    `bson:"_id"`
+	HolderID    string    `bson:"holder_id"`
+	HolderEpoch int64     `bson:"holder_epoch"`
+	ExpiresAt   time.Time `bson:"expires_at"`
+	Version     int64     `bson:"version"`
 }
 
 // Grant is the caller's proof of lease ownership.
